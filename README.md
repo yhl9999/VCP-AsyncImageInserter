@@ -1,4 +1,4 @@
-# AsyncImageInserter - 异步图片插入系统 v3.0
+# AsyncImageInserter 
 
 ## 🎯 **系统概述**
 
@@ -45,7 +45,7 @@ AsyncImageInserter是基于**Agent-to-Agent通信架构**的异步图片生成�
 
 ## 📁 **文件结构**
 
-### **VCPChat核心集成** (`D:\vcp\VCPChat\AsyncImageModules\`)
+### **VCPChat核心集成** 
 ```
 AsyncImageModules/
 ├── async-image-processor.js    # 消息预处理器 - 识别[IMG:xxx]格式
@@ -55,7 +55,7 @@ AsyncImageModules/
 └── async-image.css            # 样式文件 - 加载/成功/错误状态
 ```
 
-### **AsyncImageInserter插件** (`d:\vcp\VCPToolBox\Plugin\AsyncImageInserter\`)
+### **AsyncImageInserter插件** 
 ```
 AsyncImageInserter/
 ├── AsyncImageInserter.js       # 插件主逻辑 - 任务调度
@@ -66,7 +66,7 @@ AsyncImageInserter/
 └── test.js                   # 测试脚本
 ```
 
-### **ImageGenerator Agent** (`d:\vcp\VCPToolBox\Agent\`)
+### **ImageGenerator Agent** 
 ```
 Agent/
 └── ImageGenerator.txt         # 专业图片生成Agent配置
