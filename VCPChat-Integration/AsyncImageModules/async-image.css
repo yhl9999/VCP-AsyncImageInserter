@@ -1,0 +1,165 @@
+/* AsyncImage 样式文件 */
+
+/* 占位符加载状态 */
+.async-image-placeholder {
+    display: inline-block;
+    margin: 5px;
+    padding: 20px;
+    border: 2px dashed #ddd;
+    border-radius: 8px;
+    background: linear-gradient(45deg, #f9f9f9 25%, transparent 25%), 
+                linear-gradient(-45deg, #f9f9f9 25%, transparent 25%), 
+                linear-gradient(45deg, transparent 75%, #f9f9f9 75%), 
+                linear-gradient(-45deg, transparent 75%, #f9f9f9 75%);
+    background-size: 20px 20px;
+    background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+    animation: placeholder-shimmer 2s linear infinite;
+    text-align: center;
+    min-width: 200px;
+    min-height: 100px;
+}
+
+.loading-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+}
+
+.loading-spinner {
+    width: 24px;
+    height: 24px;
+    border: 3px solid #f3f3f3;
+    border-top: 3px solid #3498db;
+    border-radius: 50%;
+    animation: spinner-rotate 1s linear infinite;
+}
+
+.loading-text {
+    font-size: 14px;
+    color: #666;
+    font-weight: 500;
+}
+
+/* 图片结果容器 */
+.async-image-result {
+    display: inline-block;
+    margin: 5px;
+    border-radius: 8px;
+    overflow: hidden;
+    transition: all 0.3s ease;
+}
+
+.async-image-result.success {
+    opacity: 0;
+    transform: translateY(10px);
+}
+
+.async-image-result.success.loaded {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.async-image-result.success img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    transition: transform 0.2s ease;
+}
+
+.async-image-result.success img:hover {
+    transform: scale(1.02);
+    cursor: pointer;
+}
+
+/* 错误状态 */
+.async-image-result.error {
+    background: #fff5f5;
+    border: 1px solid #fed7d7;
+    padding: 15px;
+    border-radius: 8px;
+    max-width: 300px;
+}
+
+.error-message {
+    color: #c53030;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.retry-btn {
+    background: #3182ce;
+    color: white;
+    border: none;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.2s ease;
+}
+
+.retry-btn:hover {
+    background: #2c5282;
+}
+
+/* 动画效果 */
+@keyframes placeholder-shimmer {
+    0% {
+        background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+    }
+    100% {
+        background-position: 20px 20px, 20px 30px, 30px 10px, 10px 20px;
+    }
+}
+
+@keyframes spinner-rotate {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+/* 深色模式支持 */
+@media (prefers-color-scheme: dark) {
+    .async-image-placeholder {
+        background: linear-gradient(45deg, #2d3748 25%, transparent 25%), 
+                    linear-gradient(-45deg, #2d3748 25%, transparent 25%), 
+                    linear-gradient(45deg, transparent 75%, #2d3748 75%), 
+                    linear-gradient(-45deg, transparent 75%, #2d3748 75%);
+        border-color: #4a5568;
+    }
+
+    .loading-text {
+        color: #a0aec0;
+    }
+
+    .loading-spinner {
+        border-color: #4a5568;
+        border-top-color: #63b3ed;
+    }
+
+    .async-image-result.error {
+        background: #2d3748;
+        border-color: #e53e3e;
+    }
+
+    .error-message {
+        color: #fc8181;
+    }
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+    .async-image-placeholder {
+        min-width: 150px;
+        min-height: 80px;
+        padding: 15px;
+    }
+
+    .async-image-result.success img {
+        max-width: 280px;
+    }
+}

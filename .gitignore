@@ -1,0 +1,37 @@
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 日志文件
+*.log
+
+# 临时文件
+*.tmp
+*.temp
+
+# 测试文件
+test_input.json
+
+# 环境变量文件（保留示例）
+config.env
+!config.env.example
+
+# IDE文件
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS生成的文件
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Git相关
+.gitattributes
