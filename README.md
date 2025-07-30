@@ -1,4 +1,4 @@
-# AsyncImageInserter - 异步图片插入系统 v3.0
+# AsyncImageInserter 
 
 ## 🎯 **系统概述**
 
