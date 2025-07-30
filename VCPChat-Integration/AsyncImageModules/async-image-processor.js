@@ -84,102 +84,166 @@ class AsyncImageProcessor {
     }
 
     /**
-     * 提交异步图片生成任务
+     * 提交异步图片生成任务（非阻塞）
      * @param {Array} tasks - 任务列表
      */
     async submitAsyncTasks(tasks) {
         if (tasks.length === 0) return;
 
-        try {
-            // 调用AsyncImageInserter插件
-            const results = await Promise.all(
-                tasks.map(task => this.callAsyncImageInserter(task))
-            );
+        console.log(`[AsyncImageProcessor] 开始提交 ${tasks.length} 个异步任务`);
 
-            // 存储任务状态
-            tasks.forEach((task, index) => {
-                this.taskQueue.set(task.taskId, {
-                    ...task,
-                    status: results[index].success ? 'processing' : 'failed',
-                    pluginResponse: results[index]
-                });
+        // 立即返回，不等待插件响应
+        tasks.forEach(task => {
+            this.taskQueue.set(task.taskId, {
+                ...task,
+                status: 'submitting',
+                submittedAt: Date.now()
             });
 
-            return results;
-        } catch (error) {
-            console.error('[AsyncImageProcessor] 任务提交失败:', error);
-            throw error;
-        }
+            // 异步调用插件，不阻塞主线程
+            this.callAsyncImageInserterNonBlocking(task);
+        });
+
+        return tasks.map(task => ({
+            success: true,
+            taskId: task.taskId,
+            message: '任务已提交到异步处理队列'
+        }));
     }
 
     /**
-     * 调用AsyncImageInserter插件
+     * 非阻塞调用AsyncImageInserter插件
      * @param {Object} task - 图片生成任务
-     * @returns {Promise<Object>} 插件响应
      */
-    async callAsyncImageInserter(task) {
+    callAsyncImageInserterNonBlocking(task) {
         const { spawn } = require('child_process');
         const path = require('path');
 
-        return new Promise((resolve, reject) => {
-            const pluginPath = path.join(__dirname, '..', '..', 'VCPToolBox', 'Plugin', 'AsyncImageInserter', 'AsyncImageInserter.js');
-            const pluginProcess = spawn('node', [pluginPath]);
+        // 更新任务状态为处理中
+        this.updateTaskStatus(task.taskId, 'processing', {
+            startedAt: Date.now()
+        });
 
-            let responseData = '';
-            let errorData = '';
+        const pluginPath = path.join(__dirname, '..', '..', 'VCPToolBox', 'Plugin', 'AsyncImageInserter', 'AsyncImageInserter.js');
+        const pluginProcess = spawn('node', [pluginPath]);
 
-            pluginProcess.stdout.on('data', (data) => {
-                responseData += data.toString();
-            });
+        let responseData = '';
+        let errorData = '';
 
-            pluginProcess.stderr.on('data', (data) => {
-                errorData += data.toString();
-            });
+        pluginProcess.stdout.on('data', (data) => {
+            responseData += data.toString();
+        });
 
-            pluginProcess.on('close', (code) => {
-                if (code === 0) {
-                    try {
-                        // 提取JSON响应（忽略调试信息）
-                        const lines = responseData.split('\\n');
-                        const jsonLine = lines.find(line => {
-                            try {
-                                JSON.parse(line);
-                                return true;
-                            } catch {
-                                return false;
-                            }
-                        });
+        pluginProcess.stderr.on('data', (data) => {
+            errorData += data.toString();
+        });
 
-                        if (jsonLine) {
-                            resolve(JSON.parse(jsonLine));
-                        } else {
-                            reject(new Error('插件未返回有效JSON响应'));
+        pluginProcess.on('close', (code) => {
+            if (code === 0) {
+                try {
+                    // 提取JSON响应（忽略调试信息）
+                    const lines = responseData.split('\n');
+                    const jsonLine = lines.find(line => {
+                        try {
+                            JSON.parse(line);
+                            return true;
+                        } catch {
+                            return false;
                         }
-                    } catch (error) {
-                        reject(new Error(`响应解析失败: ${error.message}`));
+                    });
+
+                    if (jsonLine) {
+                        const result = JSON.parse(jsonLine);
+                        this.updateTaskStatus(task.taskId, 'completed', {
+                            pluginResponse: result,
+                            completedAt: Date.now()
+                        });
+                        
+                        // 通过WebSocket通知前端
+                        this.notifyTaskUpdate(task.taskId, 'completed', result);
+                    } else {
+                        this.handleTaskError(task.taskId, '插件未返回有效JSON响应');
                     }
-                } else {
-                    reject(new Error(`插件执行失败: ${errorData}`));
+                } catch (error) {
+                    this.handleTaskError(task.taskId, `响应解析失败: ${error.message}`);
                 }
-            });
+            } else {
+                this.handleTaskError(task.taskId, `插件执行失败: ${errorData}`);
+            }
+        });
 
-            // 发送任务数据
-            const taskData = {
-                prompt: task.prompt,
-                service: task.service,
-                ...task.options,
-                priority: 'normal'
-            };
+        pluginProcess.on('error', (error) => {
+            this.handleTaskError(task.taskId, `插件进程错误: ${error.message}`);
+        });
 
+        // 发送任务数据
+        const taskData = {
+            prompt: task.prompt,
+            service: task.service,
+            ...task.options,
+            priority: 'normal'
+        };
+
+        try {
             pluginProcess.stdin.write(JSON.stringify(taskData));
             pluginProcess.stdin.end();
+        } catch (error) {
+            this.handleTaskError(task.taskId, `数据发送失败: ${error.message}`);
+            return;
+        }
 
-            // 超时处理
-            setTimeout(() => {
+        // 超时处理
+        setTimeout(() => {
+            if (!pluginProcess.killed) {
                 pluginProcess.kill();
-                reject(new Error('插件调用超时'));
-            }, 30000);
+                this.handleTaskError(task.taskId, '插件调用超时');
+            }
+        }, 30000);
+    }
+
+    /**
+     * 处理任务错误
+     * @param {string} taskId - 任务ID
+     * @param {string} errorMessage - 错误消息
+     */
+    handleTaskError(taskId, errorMessage) {
+        console.error(`[AsyncImageProcessor] 任务失败 ${taskId}:`, errorMessage);
+        
+        this.updateTaskStatus(taskId, 'failed', {
+            error: errorMessage,
+            failedAt: Date.now()
         });
+
+        // 通过WebSocket通知前端
+        this.notifyTaskUpdate(taskId, 'failed', { error: errorMessage });
+    }
+
+    /**
+     * 通知任务更新（通过WebSocket）
+     * @param {string} taskId - 任务ID
+     * @param {string} status - 任务状态
+     * @param {Object} data - 附加数据
+     */
+    notifyTaskUpdate(taskId, status, data = {}) {
+        if (window.asyncImageIntegration && window.asyncImageIntegration.websocket) {
+            const updateData = {
+                type: 'async_image_update',
+                taskId,
+                status,
+                ...data,
+                timestamp: Date.now()
+            };
+
+            try {
+                if (window.asyncImageIntegration.websocket.readyState === WebSocket.OPEN) {
+                    window.asyncImageIntegration.websocket.send(JSON.stringify(updateData));
+                } else {
+                    console.warn(`[AsyncImageProcessor] WebSocket未连接，无法发送更新: ${taskId}`);
+                }
+            } catch (error) {
+                console.error(`[AsyncImageProcessor] WebSocket发送失败: ${error.message}`);
+            }
+        }
     }
 
     /**

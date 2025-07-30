@@ -51,7 +51,29 @@ class PlaceholderReplacer {
      * @param {Object} update - 更新数据
      */
     handleImageUpdate(update) {
-        const { taskId, status, imageUrl, error, placeholder } = update;
+        console.log('[PlaceholderReplacer] 收到图片更新:', update);
+        
+        // 兼容不同的消息格式
+        let taskId, status, imageUrl, error, placeholder;
+        
+        if (update.placeholderId) {
+            // AsyncImageInserter插件的格式
+            taskId = update.placeholderId;
+            status = update.success ? 'completed' : 'failed';
+            imageUrl = update.imageUrl;
+            error = update.error;
+            placeholder = update.placeholder;
+        } else if (update.taskId) {
+            // 通用格式
+            taskId = update.taskId;
+            status = update.status;
+            imageUrl = update.imageUrl;
+            error = update.error;
+            placeholder = update.placeholder;
+        } else {
+            console.warn('[PlaceholderReplacer] 未知的更新消息格式:', update);
+            return;
+        }
         
         this.updateQueue.push({ taskId, status, imageUrl, error, placeholder });
         
@@ -129,59 +151,168 @@ class PlaceholderReplacer {
     }
 
     /**
-     * 在DOM元素中替换占位符
+     * 在DOM元素中安全替换占位符
      * @param {Element} element - DOM元素
      * @param {string} placeholder - 占位符文本
      * @param {string} replacementHtml - 替换HTML
      */
     replacePlaceholderInElement(element, placeholder, replacementHtml) {
-        // 处理文本节点
-        this.replaceInTextNodes(element, placeholder, replacementHtml);
-        
-        // 处理innerHTML
-        if (element.innerHTML && element.innerHTML.includes(placeholder)) {
-            element.innerHTML = element.innerHTML.replace(placeholder, replacementHtml);
+        try {
+            // 使用更安全的替换方式，避免与messageRenderer冲突
+            this.safeReplaceInElement(element, placeholder, replacementHtml);
+        } catch (error) {
+            console.error('[PlaceholderReplacer] DOM替换失败:', error);
+            // 失败时尝试简单替换
+            this.fallbackReplace(element, placeholder, replacementHtml);
         }
     }
 
     /**
-     * 在文本节点中替换占位符
+     * 安全的DOM替换方法
      * @param {Element} element - DOM元素
      * @param {string} placeholder - 占位符文本
      * @param {string} replacementHtml - 替换HTML
      */
-    replaceInTextNodes(element, placeholder, replacementHtml) {
+    safeReplaceInElement(element, placeholder, replacementHtml) {
+        // 首先检查元素是否仍在DOM中
+        if (!document.contains(element)) {
+            console.warn('[PlaceholderReplacer] 元素已从DOM中移除，跳过替换');
+            return;
+        }
+
+        // 查找所有包含占位符的文本节点
+        const textNodes = this.findTextNodesWithPlaceholder(element, placeholder);
+        
+        if (textNodes.length === 0) {
+            // 如果没有文本节点包含占位符，检查innerHTML
+            this.replaceInInnerHTML(element, placeholder, replacementHtml);
+            return;
+        }
+
+        // 替换文本节点中的占位符
+        textNodes.forEach(textNode => {
+            this.replaceTextNodeContent(textNode, placeholder, replacementHtml);
+        });
+    }
+
+    /**
+     * 查找包含占位符的文本节点
+     * @param {Element} element - DOM元素
+     * @param {string} placeholder - 占位符文本
+     * @returns {Array<Text>} 文本节点数组
+     */
+    findTextNodesWithPlaceholder(element, placeholder) {
+        const textNodes = [];
         const walker = document.createTreeWalker(
             element,
             NodeFilter.SHOW_TEXT,
-            null,
+            {
+                acceptNode: function(node) {
+                    return node.textContent.includes(placeholder) ? 
+                           NodeFilter.FILTER_ACCEPT : 
+                           NodeFilter.FILTER_REJECT;
+                }
+            },
             false
         );
 
-        const textNodes = [];
         let node;
-        
         while (node = walker.nextNode()) {
-            if (node.textContent.includes(placeholder)) {
-                textNodes.push(node);
+            textNodes.push(node);
+        }
+
+        return textNodes;
+    }
+
+    /**
+     * 替换文本节点内容
+     * @param {Text} textNode - 文本节点
+     * @param {string} placeholder - 占位符文本
+     * @param {string} replacementHtml - 替换HTML
+     */
+    replaceTextNodeContent(textNode, placeholder, replacementHtml) {
+        if (!textNode.parentNode || !document.contains(textNode)) {
+            return;
+        }
+
+        const content = textNode.textContent;
+        if (!content.includes(placeholder)) {
+            return;
+        }
+
+        // 分割文本内容
+        const parts = content.split(placeholder);
+        const parent = textNode.parentNode;
+        
+        // 创建文档片段来避免多次DOM操作
+        const fragment = document.createDocumentFragment();
+        
+        for (let i = 0; i < parts.length; i++) {
+            // 添加文本部分
+            if (parts[i]) {
+                fragment.appendChild(document.createTextNode(parts[i]));
+            }
+            
+            // 在非最后部分后添加替换HTML
+            if (i < parts.length - 1) {
+                const tempDiv = document.createElement('div');
+                tempDiv.innerHTML = replacementHtml;
+                
+                // 将tempDiv的所有子节点移动到fragment
+                while (tempDiv.firstChild) {
+                    fragment.appendChild(tempDiv.firstChild);
+                }
             }
         }
 
-        textNodes.forEach(textNode => {
-            if (textNode.textContent.includes(placeholder)) {
-                const parent = textNode.parentNode;
-                const tempDiv = document.createElement('div');
-                tempDiv.innerHTML = textNode.textContent.replace(placeholder, replacementHtml);
-                
-                // 将临时div的内容插入到文本节点位置
-                while (tempDiv.firstChild) {
-                    parent.insertBefore(tempDiv.firstChild, textNode);
+        // 一次性替换文本节点
+        parent.insertBefore(fragment, textNode);
+        parent.removeChild(textNode);
+    }
+
+    /**
+     * 在innerHTML中替换占位符
+     * @param {Element} element - DOM元素
+     * @param {string} placeholder - 占位符文本
+     * @param {string} replacementHtml - 替换HTML
+     */
+    replaceInInnerHTML(element, placeholder, replacementHtml) {
+        if (element.innerHTML && element.innerHTML.includes(placeholder)) {
+            // 使用requestAnimationFrame来避免渲染阻塞
+            requestAnimationFrame(() => {
+                if (document.contains(element)) {
+                    element.innerHTML = element.innerHTML.replace(
+                        new RegExp(this.escapeRegExp(placeholder), 'g'), 
+                        replacementHtml
+                    );
                 }
-                
-                // 移除原文本节点
-                parent.removeChild(textNode);
+            });
+        }
+    }
+
+    /**
+     * 后备替换方法
+     * @param {Element} element - DOM元素
+     * @param {string} placeholder - 占位符文本
+     * @param {string} replacementHtml - 替换HTML
+     */
+    fallbackReplace(element, placeholder, replacementHtml) {
+        try {
+            if (element.innerHTML && element.innerHTML.includes(placeholder)) {
+                element.innerHTML = element.innerHTML.replace(placeholder, replacementHtml);
             }
-        });
+        } catch (error) {
+            console.error('[PlaceholderReplacer] 后备替换也失败:', error);
+        }
+    }
+
+    /**
+     * 转义正则表达式特殊字符
+     * @param {string} string - 要转义的字符串
+     * @returns {string} 转义后的字符串
+     */
+    escapeRegExp(string) {
+        return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
 
     /**

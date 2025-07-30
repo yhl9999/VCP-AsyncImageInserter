@@ -1,51 +1,38 @@
 /**
- * AgentProxy - Agent调用代理 (基于VCP Agent系统)
- * 负责与ImageGenerator Agent进行通信
+ * AgentProxy - 图片生成代理 (正确架构)
+ * 1. 使用AIClient调用后端AI优化提示词
+ * 2. 程序直接调用VCP插件生成图片
  */
 
-const { spawn } = require('child_process');
 const path = require('path');
+const AIClient = require('./aiClient');
 
 class AgentProxy {
     constructor(options = {}) {
-        this.agentId = options.agentId || 'ImageGenerator';
         this.timeout = options.timeout || 300000; // 5分钟超时
         this.debugMode = options.debugMode || false;
         
-        // VCP系统配置
-        this.vcpConfig = {
-            agentPath: this.findAgentPath(),
-            vcpServerUrl: options.vcpServerUrl || 'http://localhost:6005',
-            apiKey: options.apiKey || ''
-        };
+        // 创建AI客户端
+        this.aiClient = new AIClient({
+            apiUrl: options.aiApiUrl || process.env.API_URL,
+            apiKey: options.aiApiKey || process.env.API_Key,
+            debugMode: this.debugMode,
+            timeout: this.timeout
+        });
+
+        // VCP服务器配置
+        this.vcpServerUrl = options.vcpServerUrl || process.env.VCP_SERVER_URL || 'http://localhost:6005';
+        this.vcpApiKey = options.apiKey || process.env.VCP_API_KEY || '123456';
 
         if (this.debugMode) {
-            console.log(`[AgentProxy] 初始化完成，Agent路径: ${this.vcpConfig.agentPath}`);
+            console.log(`[AgentProxy] 初始化完成，使用正确架构`);
+            console.log(`[AgentProxy] VCP服务器: ${this.vcpServerUrl}`);
+            console.log(`[AgentProxy] AI API: ${options.aiApiUrl || process.env.API_URL || 'default'}`);
         }
     }
 
     /**
-     * 查找ImageGenerator Agent文件路径
-     * @returns {string} Agent文件路径
-     */
-    findAgentPath() {
-        // 相对于插件目录的Agent路径
-        const agentPath = path.join(__dirname, '..', '..', 'Agent', `${this.agentId}.txt`);
-        
-        try {
-            const fs = require('fs');
-            if (fs.existsSync(agentPath)) {
-                return agentPath;
-            }
-        } catch (error) {
-            console.warn(`[AgentProxy] Agent文件检查失败: ${error.message}`);
-        }
-
-        return agentPath; // 返回默认路径，即使文件不存在
-    }
-
-    /**
-     * 调用ImageGenerator Agent
+     * 调用图片生成流程
      * @param {Object} request - 生成请求
      * @returns {Promise<Object>} 生成结果
      */
@@ -54,220 +41,254 @@ class AgentProxy {
 
         try {
             if (this.debugMode) {
-                console.log(`[AgentProxy] 调用ImageGenerator Agent`);
-                console.log(`[AgentProxy] 请求参数:`, { prompt, service, options });
+                console.log(`[AgentProxy] 开始图片生成流程`);
+                console.log(`[AgentProxy] 原始请求:`, { prompt, service, options });
             }
 
-            // 构建Agent消息
-            const agentMessage = this.buildAgentMessage(prompt, service, options);
-            
-            // 发送给Agent并等待响应
-            const result = await this.sendToImageGeneratorAgent(agentMessage);
+            // 检查原始prompt是否为空
+            if (!prompt || prompt.trim() === '') {
+                throw new Error('prompt 参数不能为空');
+            }
+
+            // 步骤1: 使用AI Agent优化提示词
+            let optimizedPrompt;
+            try {
+                optimizedPrompt = await this.aiClient.optimizePrompt(prompt, service, options);
+                
+                if (this.debugMode) {
+                    console.log(`[AgentProxy] AI优化后的提示词: ${optimizedPrompt}`);
+                }
+            } catch (aiError) {
+                console.error(`[AgentProxy] AI优化失败，使用原始prompt:`, aiError.message);
+                optimizedPrompt = prompt; // 降级到原始prompt
+                
+                if (this.debugMode) {
+                    console.log(`[AgentProxy] 降级使用原始提示词: ${optimizedPrompt}`);
+                }
+            }
+
+            // 检查优化后的prompt是否为空
+            if (!optimizedPrompt || optimizedPrompt.trim() === '') {
+                throw new Error('优化后的prompt为空，请检查输入内容');
+            }
+
+            // 步骤2: 程序直接调用VCP生图插件
+            const imageResult = await this.callVCPPluginDirectly(optimizedPrompt, service, options);
             
             if (this.debugMode) {
-                console.log(`[AgentProxy] Agent响应:`, result);
+                console.log(`[AgentProxy] 生图插件返回结果:`, imageResult);
             }
 
-            return this.parseAgentResponse(result);
+            return imageResult;
 
         } catch (error) {
-            console.error(`[AgentProxy] Agent调用失败:`, error);
-            throw new Error(`ImageGenerator Agent调用失败: ${error.message}`);
+            console.error(`[AgentProxy] 图片生成流程失败:`, error);
+            throw new Error(`图片生成失败: ${error.message}`);
         }
     }
 
     /**
-     * 构建发送给ImageGenerator的消息
-     * @param {string} prompt - 图片描述
+     * 程序直接调用VCP插件 - 通过VCP的PluginManager
+     * @param {string} optimizedPrompt - 优化后的提示词
      * @param {string} service - 服务类型
-     * @param {Object} options - 选项参数
-     * @returns {string} Agent消息
+     * @param {Object} options - 选项
+     * @returns {Promise<Object>} 插件返回结果
      */
-    buildAgentMessage(prompt, service, options) {
-        let message = `请帮我生成一张图片：${prompt}`;
-        
-        // 添加服务偏好（如果指定）
-        if (service && service !== 'ComfyUI') {
-            message += `\n\n服务要求：请使用 ${service} 生成`;
-        }
-
-        // 添加参数要求
-        const requirements = [];
-        if (options.width && options.width !== 1024) {
-            requirements.push(`宽度：${options.width}px`);
-        }
-        if (options.height && options.height !== 1024) {
-            requirements.push(`高度：${options.height}px`);
-        }
-        if (options.style) {
-            requirements.push(`风格：${options.style}`);
-        }
-
-        if (requirements.length > 0) {
-            message += `\n\n参数要求：${requirements.join('，')}`;
-        }
-
-        message += `\n\n请直接生成图片，返回图片URL即可。`;
-
-        return message;
-    }
-
-    /**
-     * 发送消息给ImageGenerator Agent
-     * @param {string} message - 消息内容
-     * @returns {Promise<string>} Agent响应
-     */
-    async sendToImageGeneratorAgent(message) {
-        return new Promise((resolve, reject) => {
-            // 构建模拟的VCP Agent调用
-            // 在实际环境中，这里应该通过VCP的Agent系统调用
+    async callVCPPluginDirectly(optimizedPrompt, service, options) {
+        try {
+            // 确定要调用的插件
+            const pluginMap = {
+                'ComfyUI': 'ComfyUIGen',
+                'FluxGen': 'FluxGen', 
+                'NovelAI': 'NovelAIGen'
+            };
+            
+            const pluginName = pluginMap[service] || 'ComfyUIGen';
             
             if (this.debugMode) {
-                console.log(`[AgentProxy] 发送消息给ImageGenerator:`);
-                console.log(`[AgentProxy] 消息内容: ${message}`);
+                console.log(`[AgentProxy] 通过PluginManager调用插件: ${pluginName}`);
+                console.log(`[AgentProxy] 使用优化提示词: ${optimizedPrompt}`);
             }
 
-            // 模拟Agent响应（实际环境中需要真实调用）
-            const mockResponse = this.generateMockResponse(message);
-            
-            setTimeout(() => {
-                resolve(mockResponse);
-            }, 2000); // 模拟2秒处理时间
-        });
-    }
-
-    /**
-     * 生成模拟响应（用于测试）
-     * @param {string} message - 原始消息
-     * @returns {string} 模拟响应
-     */
-    generateMockResponse(message) {
-        // 从消息中提取信息生成模拟响应
-        const isComfyUI = message.includes('ComfyUI') || !message.includes('FluxGen') && !message.includes('NovelAI');
-        const isFluxGen = message.includes('FluxGen');
-        const isNovelAI = message.includes('NovelAI');
-
-        let service = 'ComfyUI';
-        if (isFluxGen) service = 'FluxGen';
-        if (isNovelAI) service = 'NovelAI';
-
-        // 生成模拟的图片URL
-        const mockImageId = Math.random().toString(36).substr(2, 9);
-        const mockImageUrl = `http://localhost:6005/pw=123456/images/async/${mockImageId}.png`;
-
-        return `已完成图片生成任务！
-
-服务：${service}
-状态：成功生成
-图片URL：${mockImageUrl}
-
-<img src="${mockImageUrl}" alt="Generated image" width="300">
-
-任务完成时间：${new Date().toLocaleString()}`;
-    }
-
-    /**
-     * 解析Agent响应
-     * @param {string} rawResponse - 原始响应
-     * @returns {Object} 解析后的响应
-     */
-    parseAgentResponse(rawResponse) {
-        try {
-            // 提取图片URL
-            const imageUrls = this.extractImageUrls(rawResponse);
-            
-            if (imageUrls.length === 0) {
-                throw new Error('Agent响应中未找到有效的图片URL');
-            }
-
-            // 提取使用的服务信息
-            const serviceMatch = rawResponse.match(/服务[：:](\\s*)(\\w+)/);
-            const usedService = serviceMatch ? serviceMatch[2] : 'Unknown';
-
-            // 检查是否成功
-            const isSuccess = rawResponse.includes('成功') || rawResponse.includes('完成');
-
-            return {
-                success: isSuccess,
-                imageUrl: imageUrls[0],
-                allImageUrls: imageUrls,
-                service: usedService,
-                originalResponse: rawResponse,
-                timestamp: new Date().toISOString()
+            // 构建插件调用参数
+            const pluginArgs = {
+                prompt: optimizedPrompt
             };
+            
+            // 添加可选参数
+            if (options.width) pluginArgs.width = options.width;
+            if (options.height) pluginArgs.height = options.height;
+            if (options.steps) pluginArgs.steps = options.steps;
+            if (options.style) pluginArgs.style = options.style;
+            if (options.negative_prompt) pluginArgs.negative_prompt = options.negative_prompt;
+
+            // 尝试获取全局PluginManager实例
+            if (typeof global.pluginManager !== 'undefined') {
+                if (this.debugMode) {
+                    console.log(`[AgentProxy] 使用全局PluginManager调用插件`);
+                }
+                
+                const result = await global.pluginManager.executePlugin(pluginName, JSON.stringify(pluginArgs));
+                
+                if (this.debugMode) {
+                    console.log(`[AgentProxy] PluginManager返回:`, result);
+                }
+                
+                return this.parsePluginManagerResponse(result);
+                
+            } else {
+                // 如果没有全局PluginManager，尝试require方式
+                try {
+                    const pluginManager = require('../../Plugin');
+                    
+                    // 确保插件已加载
+                    if (pluginManager.plugins.size === 0) {
+                        if (this.debugMode) {
+                            console.log(`[AgentProxy] PluginManager插件未加载，尝试加载插件...`);
+                        }
+                        // 设置项目基础路径
+                        pluginManager.projectBasePath = path.join(__dirname, '../..');
+                        await pluginManager.loadPlugins();
+                    }
+                    
+                    if (this.debugMode) {
+                        console.log(`[AgentProxy] 使用require的PluginManager实例调用插件`);
+                        console.log(`[AgentProxy] 可用插件:`, Array.from(pluginManager.plugins.keys()));
+                    }
+                    
+                    const result = await pluginManager.executePlugin(pluginName, JSON.stringify(pluginArgs));
+                    return this.parsePluginManagerResponse(result);
+                    
+                } catch (requireError) {
+                    console.error(`[AgentProxy] 无法获取PluginManager:`, requireError);
+                    throw new Error(`无法调用插件：PluginManager不可用 - ${requireError.message}`);
+                }
+            }
+
+        } catch (error) {
+            console.error(`[AgentProxy] 插件调用失败:`, error);
+            throw new Error(`插件调用失败: ${error.message}`);
+        }
+    }
+
+    /**
+     * 解析PluginManager返回的响应
+     * @param {Object} response - PluginManager响应对象
+     * @returns {Object} 解析结果
+     */
+    parsePluginManagerResponse(response) {
+        try {
+            if (this.debugMode) {
+                console.log(`[AgentProxy] 解析PluginManager响应:`, response);
+            }
+
+            // PluginManager返回格式: {status: "success"/"error", result/error: "..."}
+            if (response.status === 'success' && response.result) {
+                // 尝试解析result（可能是JSON字符串）
+                let resultData = response.result;
+                if (typeof resultData === 'string') {
+                    try {
+                        resultData = JSON.parse(resultData);
+                    } catch (parseError) {
+                        // 如果不是JSON，直接使用字符串
+                        if (this.debugMode) {
+                            console.log(`[AgentProxy] result不是JSON，直接使用字符串: ${resultData}`);
+                        }
+                    }
+                }
+                
+                // 尝试提取图片URL
+                const imageUrl = this.extractImageUrl(resultData);
+                
+                if (imageUrl) {
+                    if (this.debugMode) {
+                        console.log(`[AgentProxy] 成功提取图片URL: ${imageUrl}`);
+                    }
+                    
+                    return {
+                        success: true,
+                        imageUrl: imageUrl,
+                        originalResponse: response
+                    };
+                } else {
+                    console.warn(`[AgentProxy] 插件响应中未找到图片URL`);
+                    console.warn(`[AgentProxy] 插件返回:`, resultData);
+                    
+                    return {
+                        success: false,
+                        error: '插件响应中未找到图片URL',
+                        originalResponse: response
+                    };
+                }
+            } else {
+                // 插件执行失败
+                const errorMsg = response.error || '插件执行失败';
+                console.error(`[AgentProxy] 插件执行失败: ${errorMsg}`);
+                
+                return {
+                    success: false,
+                    error: errorMsg,
+                    originalResponse: response
+                };
+            }
 
         } catch (error) {
             console.error(`[AgentProxy] 响应解析失败:`, error);
-            throw new Error(`响应解析失败: ${error.message}`);
+            
+            return {
+                success: false,
+                error: `响应解析失败: ${error.message}`,
+                originalResponse: response
+            };
         }
     }
 
     /**
-     * 从文本中提取图片URL
-     * @param {string} text - 文本内容
-     * @returns {Array<string>} 图片URL列表
+     * 从各种格式中提取图片URL
+     * @param {any} data - 数据
+     * @returns {string|null} 图片URL
      */
-    extractImageUrls(text) {
-        // 匹配各种可能的图片URL格式
-        const patterns = [
-            /https?:\/\/[^\s<>"\\[\\]{}|\\^`]+\\.(png|jpg|jpeg|gif|webp)/gi,
-            /src="([^"]*\\.(png|jpg|jpeg|gif|webp)[^"]*)"/gi,
-            /图片URL[：:]\\s*([^\\s\\n]+)/gi
+    extractImageUrl(data) {
+        if (!data) return null;
+        
+        const content = typeof data === 'string' ? data : JSON.stringify(data);
+        
+        // 尝试提取图片URL的多种模式
+        const urlPatterns = [
+            // HTML img标签
+            /<img[^>]+src="([^"]+)"/gi,
+            // Markdown图片
+            /!\[[^\]]*\]\(([^)]+)\)/gi,
+            // 直接的URL
+            /https?:\/\/[^\s<>"]+\.(?:jpg|jpeg|png|gif|webp|svg)/gi,
+            // localhost URLs
+            /http:\/\/localhost[^\s<>"]+\.(?:jpg|jpeg|png|gif|webp|svg)/gi
         ];
 
-        const urls = new Set();
-
-        patterns.forEach(pattern => {
-            let match;
-            while ((match = pattern.exec(text)) !== null) {
-                const url = match[1] || match[0];
-                if (url && url.startsWith('http')) {
-                    urls.add(url);
+        for (const pattern of urlPatterns) {
+            const matches = content.match(pattern);
+            if (matches && matches.length > 0) {
+                if (pattern.toString().includes('src=') || pattern.toString().includes('](')) {
+                    // 提取src或markdown中的URL
+                    const urlMatch = matches[0].match(/(?:src="|]\()([^"']+)/);
+                    if (urlMatch) {
+                        return urlMatch[1];
+                    }
+                } else {
+                    // 直接的URL匹配
+                    return matches[0];
                 }
             }
-        });
-
-        return Array.from(urls);
-    }
-
-    /**
-     * 健康检查 - 测试Agent是否可用
-     * @returns {Promise<boolean>} 是否可用
-     */
-    async healthCheck() {
-        try {
-            const testResult = await this.callImageGenerationAgent({
-                prompt: '测试连接 - 简单的蓝色圆形',
-                service: 'ComfyUI'
-            });
-            
-            const isHealthy = testResult.success && testResult.imageUrl;
-            
-            if (this.debugMode) {
-                console.log(`[AgentProxy] 健康检查结果: ${isHealthy ? '✅ 正常' : '❌ 异常'}`);
-            }
-            
-            return isHealthy;
-            
-        } catch (error) {
-            console.warn(`[AgentProxy] 健康检查失败:`, error.message);
-            return false;
         }
+        
+        // 如果是直接的URL字符串
+        if (typeof data === 'string' && (data.startsWith('http') || data.includes('localhost'))) {
+            return data;
+        }
+        
+        return null;
     }
 
-    /**
-     * 获取Agent状态信息
-     * @returns {Object} 状态信息
-     */
-    getStatus() {
-        return {
-            agentId: this.agentId,
-            agentPath: this.vcpConfig.agentPath,
-            timeout: this.timeout,
-            debugMode: this.debugMode,
-            vcpServerUrl: this.vcpConfig.vcpServerUrl
-        };
-    }
 }
 
 module.exports = AgentProxy;

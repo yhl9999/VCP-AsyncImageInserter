@@ -5,19 +5,20 @@
   "version": "1.0.0",
   "description": "基于Agent协作的异步图片插入系统。主Agent调用此工具立即获得占位符，后台静默调用专门的图片生成Agent完成图片生成，最终实现文字+图片的无缝布局。",
   "author": "VCP-Assistant",
-  "pluginType": "service",
+  "pluginType": "synchronous",
   "entryPoint": {
-    "script": "AsyncImageInserter.js"
+    "type": "nodejs",
+    "command": "node AsyncImageInserter.js"
   },
   "communication": {
-    "protocol": "direct",
+    "protocol": "stdio",
     "timeout": 30000
   },
   "configSchema": {
     "IMAGE_GENERATOR_AGENT_ID": {
       "type": "string",
       "description": "专门负责图片生成的Agent ID",
-      "default": "ImageGenerator"
+      "default": "image-generator"
     },
     "DEFAULT_IMAGE_SERVICE": {
       "type": "string", 
@@ -38,16 +39,6 @@
       "type": "number",
       "description": "任务超时时间(毫秒)",
       "default": 300000
-    },
-    "VCP_SERVER_URL": {
-      "type": "string",
-      "description": "VCP服务器URL",
-      "default": "http://localhost:6005"
-    },
-    "VCP_API_KEY": {
-      "type": "string", 
-      "description": "VCP API密钥",
-      "default": "123456"
     }
   },
   "capabilities": {
@@ -55,7 +46,7 @@
       {
         "commandIdentifier": "AsyncImageInserter",
         "description": "异步图片生成工具。主Agent调用此工具时会立即收到占位符，可继续生成内容而不被阻塞。后台会静默调用专门的图片生成Agent完成实际的图片生成工作。\n\n工作流程：\n1. 主Agent调用工具 → 立即获得占位符 → 继续写作\n2. 后台静默调用图片生成Agent → 生成完成后替换占位符\n3. 最终呈现：文字+图片+文字+图片的完美布局\n\n必需参数：\n- prompt (字符串): 图片生成描述，将发送给图片生成Agent\n\n可选参数：\n- service (字符串): 指定图片生成服务 (ComfyUI/FluxGen/NovelAI)\n- width (数字): 图片宽度\n- height (数字): 图片高度\n- priority (字符串): 任务优先级 (low/normal/high)\n\n注意：此工具专为异步场景设计，主Agent无需等待图片生成完成。",
-        "example": "AsyncImageInserter(prompt=\"雪山日出的壮观景色，阳光透过云层洒向大地，摄影风格\", service=\"ComfyUI\")"
+        "example": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」AsyncImageInserter「末」,\nprompt:「始」雪山日出的壮观景色，阳光透过云层洒向大地，摄影风格「末」,\nservice:「始」ComfyUI「末」\n<<<[END_TOOL_REQUEST]>>>"
       }
     ]
   }

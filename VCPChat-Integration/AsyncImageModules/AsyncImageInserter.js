@@ -5,18 +5,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const dotenv = require('dotenv');
 const PlaceholderManager = require('./placeholderManager');
 const AgentProxy = require('./agentProxy');
-
-// 引入ImageProcessor缓存功能
-const ImageProcessorPath = path.join(__dirname, '../ImageProcessor/image-processor.js');
-
-// 加载VCP的配置文件
-const vcpConfigPath = path.join(__dirname, '../../config.env');
-if (fs.existsSync(vcpConfigPath)) {
-    dotenv.config({ path: vcpConfigPath });
-}
 
 class AsyncImageInserter {
     constructor() {
@@ -26,13 +16,8 @@ class AsyncImageInserter {
         });
         this.agentProxy = new AgentProxy({
             agentId: this.config.IMAGE_GENERATOR_AGENT_ID,
-            timeout: parseInt(this.config.TASK_TIMEOUT) || 300000,
-            debugMode: this.config.DEBUG_MODE === 'true',
-            vcpServerUrl: this.config.VCP_SERVER_URL,
-            apiKey: this.config.VCP_API_KEY,
-            // 使用VCP的AI API配置
-            aiApiUrl: process.env.API_URL,
-            aiApiKey: process.env.API_Key
+            timeout: this.config.TASK_TIMEOUT,
+            debugMode: this.config.DEBUG_MODE === 'true'
         });
         
         // 任务队列管理
@@ -76,15 +61,12 @@ class AsyncImageInserter {
 
         // 设置默认值
         return {
-            IMAGE_GENERATOR_AGENT_ID: 'ImageGenerator',
+            IMAGE_GENERATOR_AGENT_ID: 'image-generator',
             DEFAULT_IMAGE_SERVICE: 'ComfyUI',
             PLACEHOLDER_PREFIX: 'ASYNC_IMG',
             MAX_CONCURRENT_TASKS: '3',
             TASK_TIMEOUT: '300000',
             DEBUG_MODE: 'false',
-            VCP_KEY: '123456',
-            VCP_SERVER_URL: 'http://localhost:6005',
-            VCP_API_KEY: '123456',
             ...config
         };
     }
@@ -255,169 +237,12 @@ class AsyncImageInserter {
     }
 
     /**
-     * 通知前端替换占位符 - 增强版支持Base64缓存
+     * 通知前端替换占位符
      * @param {Object} task - 任务对象
      * @param {Object} result - 生成结果
      */
     async notifyPlaceholderReplacement(task, result) {
-        try {
-            // 获取图片的Base64数据和缩略图
-            const imageData = await this.generateImageDataForCache(result.imageUrl, task.prompt);
-            
-            // 构建增强的图片HTML - 包含Base64回退
-            const imageHtml = this.buildEnhancedImageHtml(result.imageUrl, imageData, task.prompt);
-
-            const updateData = {
-                type: 'placeholder_replace',
-                placeholderId: task.id,
-                placeholder: task.placeholder,
-                imageUrl: result.imageUrl,
-                imageHtml: imageHtml,
-                // 混合存储模式数据
-                base64Data: imageData.base64Data,
-                thumbnailBase64: imageData.thumbnailBase64,
-                description: task.prompt,
-                fileSize: imageData.fileSize,
-                success: true
-            };
-
-            // 缓存到ImageProcessor系统
-            if (imageData.base64Data) {
-                await this.cacheImageToProcessor(imageData.base64Data, task.prompt, task.id);
-            }
-
-            await this.sendUpdateNotification(updateData);
-            
-        } catch (error) {
-            console.error('[AsyncImageInserter] 增强图片处理失败:', error);
-            // 降级到简单模式
-            await this.notifyPlaceholderReplacementSimple(task, result);
-        }
-    }
-
-    /**
-     * 生成图片数据用于缓存
-     * @param {string} imageUrl - 图片URL
-     * @param {string} description - 图片描述
-     * @returns {Object} 图片数据
-     */
-    async generateImageDataForCache(imageUrl, description) {
-        try {
-            const { default: fetch } = await import('node-fetch');
-            
-            // 下载图片
-            const response = await fetch(imageUrl);
-            const buffer = await response.buffer();
-            
-            // 生成Base64数据
-            const base64Data = `data:image/png;base64,${buffer.toString('base64')}`;
-            
-            // 尝试生成缩略图，如果sharp不可用则跳过
-            let thumbnailBase64 = null;
-            try {
-                const sharp = require('sharp');
-                const thumbnailBuffer = await sharp(buffer)
-                    .resize(150, 150, { fit: 'inside', withoutEnlargement: true })
-                    .png({ quality: 80 })
-                    .toBuffer();
-                thumbnailBase64 = `data:image/png;base64,${thumbnailBuffer.toString('base64')}`;
-            } catch (sharpError) {
-                console.warn('[AsyncImageInserter] Sharp不可用，跳过缩略图生成:', sharpError.message);
-            }
-
-            return {
-                base64Data,
-                thumbnailBase64,
-                fileSize: buffer.length,
-                width: null, // 可以通过sharp获取，但非必需
-                height: null
-            };
-            
-        } catch (error) {
-            console.error('[AsyncImageInserter] 图片数据生成失败:', error);
-            return {
-                base64Data: null,
-                thumbnailBase64: null,
-                fileSize: 0
-            };
-        }
-    }
-
-    /**
-     * 构建增强的图片HTML
-     * @param {string} imageUrl - 原始URL
-     * @param {Object} imageData - 图片数据
-     * @param {string} alt - alt文本
-     * @returns {string} 增强的HTML
-     */
-    buildEnhancedImageHtml(imageUrl, imageData, alt) {
-        const style = "border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin: 5px; max-width: 300px;";
-        
-        if (imageData.base64Data) {
-            // 混合模式：优先使用URL，Base64作为回退
-            return `<img src="${imageUrl}" data-base64="${imageData.base64Data}" alt="${alt}" style="${style}" 
-                    onerror="this.src=this.dataset.base64; this.removeAttribute('data-base64');">`;
-        } else {
-            // 简单模式：仅URL
-            return `<img src="${imageUrl}" alt="${alt}" style="${style}">`;
-        }
-    }
-
-    /**
-     * 缓存图片到ImageProcessor系统
-     * @param {string} base64Data - Base64图片数据
-     * @param {string} description - 图片描述
-     * @param {string} taskId - 任务ID
-     */
-    async cacheImageToProcessor(base64Data, description, taskId) {
-        try {
-            // 直接操作ImageProcessor的缓存文件
-            const imageCachePath = path.join(__dirname, '../ImageProcessor/multimodal_cache.json');
-            
-            let mediaCache = {};
-            try {
-                if (fs.existsSync(imageCachePath)) {
-                    const data = fs.readFileSync(imageCachePath, 'utf-8');
-                    mediaCache = JSON.parse(data);
-                }
-            } catch (error) {
-                console.warn('[AsyncImageInserter] ImageProcessor缓存文件读取失败，创建新缓存:', error);
-            }
-
-            // 提取纯Base64数据（移除前缀）
-            const base64PrefixPattern = /^data:(image|audio|video)\/[^;]+;base64,/;
-            const pureBase64Data = base64Data.replace(base64PrefixPattern, '');
-
-            // 构建缓存条目，与ImageProcessor格式兼容
-            const cacheEntry = {
-                description: `AsyncImage生成: ${description}`,
-                id: `async_${taskId}`,
-                timestamp: new Date().toISOString(),
-                source: 'AsyncImageInserter',
-                taskId: taskId
-            };
-
-            // 添加到缓存
-            mediaCache[pureBase64Data] = cacheEntry;
-
-            // 保存缓存文件
-            fs.writeFileSync(imageCachePath, JSON.stringify(mediaCache, null, 2));
-            
-            if (this.config.DEBUG_MODE === 'true') {
-                console.error('[AsyncImageInserter] 图片已缓存到ImageProcessor:', taskId);
-            }
-            
-        } catch (error) {
-            console.error('[AsyncImageInserter] ImageProcessor缓存失败:', error);
-        }
-    }
-
-    /**
-     * 降级的简单通知方法
-     * @param {Object} task - 任务对象
-     * @param {Object} result - 生成结果
-     */
-    async notifyPlaceholderReplacementSimple(task, result) {
+        // 构建图片HTML
         const imageHtml = `<img src="${result.imageUrl}" alt="${task.prompt}" width="300" style="border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin: 5px;">`;
 
         const updateData = {
@@ -429,6 +254,8 @@ class AsyncImageInserter {
             success: true
         };
 
+        // 这里需要实现与VCPChat前端的通信
+        // 可以通过WebSocket、IPC或其他方式
         await this.sendUpdateNotification(updateData);
     }
 
@@ -453,74 +280,23 @@ class AsyncImageInserter {
     }
 
     /**
-     * 发送更新通知 - 通过VCPToolBox的统一WebSocket接口
+     * 发送更新通知 (待实现与VCPChat的通信机制)
      * @param {Object} updateData - 更新数据
      */
     async sendUpdateNotification(updateData) {
+        // TODO: 实现与VCPChat前端的通信
+        // 可能的方案：
+        // 1. WebSocket推送
+        // 2. IPC消息  
+        // 3. 文件系统监听
+        // 4. HTTP回调
+
         if (this.config.DEBUG_MODE === 'true') {
             console.error('[AsyncImageInserter] 发送更新通知:', updateData);
         }
 
-        try {
-            // 通过VCPToolBox的统一WebSocket接口广播更新
-            await this.broadcastViaWebSocket(updateData);
-            
-        } catch (error) {
-            console.error('[AsyncImageInserter] 更新通知发送失败:', error);
-            // 失败时输出到控制台作为备份
-            this.outputStandardUpdate(updateData);
-        }
-    }
-
-    /**
-     * 通过VCPToolBox统一WebSocket广播更新
-     * @param {Object} updateData - 更新数据
-     */
-    async broadcastViaWebSocket(updateData) {
-        // 检查VCPToolBox是否有WebSocket服务器
-        if (typeof global.webSocketServer === 'undefined') {
-            // 尝试引入WebSocket服务器模块
-            try {
-                const webSocketServer = require('../../WebSocketServer');
-                if (webSocketServer && typeof webSocketServer.broadcastToAsyncImageClients === 'function') {
-                    const message = {
-                        type: 'async_image_update',
-                        source: 'AsyncImageInserter',
-                        ...updateData,
-                        timestamp: Date.now()
-                    };
-                    
-                    webSocketServer.broadcastToAsyncImageClients(message);
-                    
-                    if (this.config.DEBUG_MODE === 'true') {
-                        console.error('[AsyncImageInserter] WebSocket广播成功');
-                    }
-                    return;
-                }
-            } catch (error) {
-                console.error('[AsyncImageInserter] 无法访问WebSocket服务器:', error);
-            }
-        }
-
-        // 如果WebSocket不可用，输出标准格式
-        this.outputStandardUpdate(updateData);
-    }
-
-    /**
-     * 输出标准格式的更新通知
-     * @param {Object} updateData - 更新数据
-     */
-    outputStandardUpdate(updateData) {
-        // 使用特殊前缀让VCPChat识别和捕获
-        const standardOutput = {
-            type: 'VCP_ASYNC_UPDATE',
-            timestamp: Date.now(),
-            source: 'AsyncImageInserter',
-            data: updateData
-        };
-        
-        // 输出到stderr以便VCPChat父进程捕获
-        console.error('[VCP_ASYNC_UPDATE]', JSON.stringify(standardOutput));
+        // 临时实现：输出到控制台
+        console.error('[AsyncImageInserter] PLACEHOLDER_UPDATE:', JSON.stringify(updateData));
     }
 
     /**
@@ -546,24 +322,6 @@ class AsyncImageInserter {
     }
 
     /**
-     * 处理新的WebSocket客户端连接
-     * @param {WebSocket} ws - WebSocket连接对象
-     */
-    handleNewClient(ws) {
-        if (this.config.DEBUG_MODE === 'true') {
-            console.error('[AsyncImageInserter] 新的WebSocket客户端连接');
-        }
-        
-        // 这里可以添加客户端特定的初始化逻辑
-        // 例如发送当前进行中的任务状态等
-        ws.send(JSON.stringify({
-            type: 'init',
-            message: 'AsyncImageInserter WebSocket连接已建立',
-            timestamp: Date.now()
-        }));
-    }
-
-    /**
      * 获取系统状态
      * @returns {Object} 系统状态
      */
@@ -578,65 +336,7 @@ class AsyncImageInserter {
     }
 }
 
-// 插件入口点 - Service插件模式
-function registerRoutes(app, config, projectBasePath) {
-    const inserter = new AsyncImageInserter();
-    
-    // 设置插件配置
-    Object.assign(inserter.config, config);
-    
-    console.log('[AsyncImageInserter] Service插件已启动，配置:', inserter.config);
-    
-    // 注册工具调用路由
-    app.post('/plugin/AsyncImageInserter/execute', async (req, res) => {
-        try {
-            const response = await inserter.processRequest(req.body);
-            res.json(response);
-        } catch (error) {
-            console.error('[AsyncImageInserter] 路由处理错误:', error);
-            res.status(500).json({
-                status: "error",
-                error: `Service处理错误: ${error.message}`
-            });
-        }
-    });
-    
-    // 注册系统状态路由
-    app.get('/plugin/AsyncImageInserter/status', (req, res) => {
-        try {
-            const status = inserter.getSystemStatus();
-            res.json(status);
-        } catch (error) {
-            console.error('[AsyncImageInserter] 状态查询错误:', error);
-            res.status(500).json({
-                error: error.message
-            });
-        }
-    });
-    
-    // 注册任务状态查询路由
-    app.get('/plugin/AsyncImageInserter/task/:taskId', (req, res) => {
-        try {
-            const status = inserter.getTaskStatus(req.params.taskId);
-            res.json(status);
-        } catch (error) {
-            console.error('[AsyncImageInserter] 任务状态查询错误:', error);
-            res.status(500).json({
-                error: error.message
-            });
-        }
-    });
-    
-    console.log('[AsyncImageInserter] Service插件路由已注册');
-}
-
-// 插件关闭处理
-function shutdown() {
-    console.log('[AsyncImageInserter] Service插件正在关闭...');
-    // 这里可以添加清理逻辑
-}
-
-// 旧的stdin模式入口点 - 保留用于兼容性
+// 插件入口点
 async function main() {
     const inserter = new AsyncImageInserter();
 
@@ -722,8 +422,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { 
-    AsyncImageInserter,
-    registerRoutes, 
-    shutdown 
-};
+module.exports = AsyncImageInserter;
